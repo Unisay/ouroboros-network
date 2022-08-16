@@ -50,7 +50,6 @@ import           Data.Maybe (fromJust, fromMaybe)
 import           Data.Set (Set)
 import qualified Data.Set as Set
 import           Data.TreeDiff.Class (genericToExpr)
-import           Data.TreeDiff.Expr (Expr (App))
 import           Data.Word
 import           GHC.Generics (Generic)
 import qualified System.Directory as Dir
@@ -343,65 +342,10 @@ instance StowableLedgerTables (LedgerState TestBlock) where
 stowErr :: String -> a
 stowErr fname = error $ "Function " <> fname <> " should not be used in these tests."
 
-instance ToExpr (ApplyMapKind' mk' Token TValue) where
-  toExpr ApplyEmptyMK                 = App "ApplyEmptyMK"     []
-  toExpr (ApplyDiffMK diffs)          = App "ApplyDiffMK"      [genericToExpr diffs]
-  toExpr (ApplyKeysMK keys)           = App "ApplyKeysMK"      [genericToExpr keys]
-  toExpr (ApplySeqDiffMK (HD.SeqUtxoDiff seqdiff))
-                                      = App "ApplySeqDiffMK"   [genericToExpr $ toList seqdiff]
-  toExpr (ApplyTrackingMK vals diffs) = App "ApplyTrackingMK"  [ genericToExpr vals
-                                                               , genericToExpr diffs
-                                                               ]
-  toExpr (ApplyValuesMK vals)         = App "ApplyValuesMK"    [genericToExpr vals]
-  toExpr ApplyQueryAllMK              = App "ApplyQueryAllMK"  []
-  toExpr (ApplyQuerySomeMK keys)      = App "ApplyQuerySomeMK" [genericToExpr keys]
-
--- About this instance: we have that the use of
---
--- > genericToExpr UtxoDiff
---
--- in instance ToExpr (ApplyMapKind mk Token TValue) requires
---
--- >  ToExpr Map k (UtxoEntryDiff v )
---
--- requires
---
--- > ToExpr (UtxoEntryDiff v )
---
--- requires
---
--- > ToExpr UtxoEntryDiffState
---
-instance ToExpr HD.UtxoEntryDiffState where
-  toExpr = genericToExpr
-
--- See instance ToExpr HD.UtxoEntryDiffState
-instance ToExpr (HD.UtxoEntryDiff TValue) where
-  toExpr = genericToExpr
-
-instance ToExpr (ExtLedgerState TestBlock ValuesMK) where
-  toExpr = genericToExpr
-
 instance ToExpr (LedgerState (TestBlockWith Tx) ValuesMK) where
   toExpr = genericToExpr
 
--- Required by the ToExpr (SeqUtxoDiff k v) instance
-instance ToExpr (HD.SudElement Token TValue) where
-  toExpr = genericToExpr
-
--- Required by the ToExpr (HD.SudElement Token TValue) instance
-instance ToExpr (HD.UtxoDiff Token TValue) where
-  toExpr = genericToExpr
-
 instance ToExpr (LedgerTables (LedgerState TestBlock) ValuesMK) where
-  toExpr = genericToExpr
-
--- Required by the genericToExpr application on RewoundKeys
-instance ToExpr (HD.UtxoKeys Token TValue) where
-  toExpr = genericToExpr
-
--- Required by the genericToExpr application on RewoundKeys
-instance ToExpr (HD.UtxoValues Token TValue) where
   toExpr = genericToExpr
 
 {-------------------------------------------------------------------------------
