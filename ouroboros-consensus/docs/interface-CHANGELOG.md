@@ -56,6 +56,15 @@ may appear out of chronological order.
 The internals of each entry are organized similar to
 https://keepachangelog.com/en/1.1.0/, adapted to our plan explained above.
 
+## Circa 2022-08-22
+
+### Changed
+
+- The `protocolInfoTPraosShelleyBased` and `protocolInfoPraosShelleyBased`
+  functions now expect a tuple of the `AdditionalGenesisConfig` and the
+  `TranslationContext` instead of just the `TranslationContext`. For all
+  Shelley-based eras before Conway, those had been equal types.
+
 ## Circa 2022-08-08
 
 ### Added
