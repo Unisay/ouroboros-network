@@ -22,7 +22,12 @@
 -- | FIXME: Remove
 {-# OPTIONS_GHC -Wno-missing-methods #-}
 
-module Test.Ouroboros.Storage.LedgerDB.HD.BackingStore (tests) where
+module Test.Ouroboros.Storage.LedgerDB.HD.BackingStore (
+    Test.Ouroboros.Storage.LedgerDB.HD.BackingStore.showLabelledExamples
+  , tests
+  ) where
+
+import           Prelude hiding (minimum)
 
 import           Control.Monad
 import qualified Control.Monad.Class.MonadSTM as STM
@@ -35,17 +40,21 @@ import           Data.Functor.Classes
 import           Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import           Data.Maybe (fromJust)
+import           Data.Ord (Down (Down, getDown))
 import qualified Data.Set as Set
 import           GHC.Generics (Generic)
 import qualified System.Directory as Dir
 import           System.IO.Temp (createTempDirectory)
+import           System.Random hiding (next)
 
 import           Cardano.Binary (FromCBOR (..), ToCBOR (..))
 
 import           Test.QuickCheck (Gen)
 import qualified Test.QuickCheck as QC
 import qualified Test.QuickCheck.Monadic as QC
+import qualified Test.QuickCheck.Random as QC
 import           Test.StateMachine
+import qualified Test.StateMachine.Labelling as Label
 import qualified Test.StateMachine.Types as QSM
 import qualified Test.StateMachine.Types.Rank2 as Rank2
 import           Test.Tasty (TestTree, testGroup)
@@ -60,6 +69,7 @@ import           Ouroboros.Consensus.Storage.FS.IO (ioHasFS)
 import qualified Ouroboros.Consensus.Storage.LedgerDB.HD as HD
 import qualified Ouroboros.Consensus.Storage.LedgerDB.HD.BackingStore as BS
 import           Ouroboros.Consensus.Storage.LedgerDB.OnDisk
+import           Ouroboros.Consensus.Util (repeatedly)
 import           Ouroboros.Consensus.Util.IOLike
 
 import           Test.Util.Orphans.ToExpr ()
@@ -72,7 +82,7 @@ import           Test.Util.Orphans.ToExpr ()
 
 tests :: TestTree
 tests = testGroup "BackingStore" [
-    testProperty "InMemory" $ prop_sequential InMemoryBackingStore
+    testProperty "InMemory" $ prop_sequential operations InMemoryBackingStore
   ]
 
 {------------------------------------------------------------------------------
@@ -146,6 +156,7 @@ data Operations keys values diff = Operations {
   , genDiff         :: Model values Symbolic -> Gen diff
   , genRangeQuery   :: Model values Symbolic -> Gen (BS.RangeQuery keys)
   , genKeys         :: Model values Symbolic -> Gen keys
+  , valuesLength    :: values -> Int
   }
 
 {------------------------------------------------------------------------------
@@ -622,9 +633,9 @@ precondition (Model mock hs) (At c) =
   Running the tests
 ------------------------------------------------------------------------------}
 
-prop_sequential :: BackingStoreSelector IO -> QC.Property
-prop_sequential bss =
-    forAllCommands (sm ops shfs bs) Nothing $ \cmds ->
+prop_sequential :: Operations K V D -> BackingStoreSelector IO -> QC.Property
+prop_sequential ops bss =
+    forAllCommands (sm ops shfsUnused bsUnused) Nothing $ \cmds ->
       QC.monadicIO $ do
         hasFS@(SomeHasFS hasFS') <- SomeHasFS . ioHasFS . MountPoint <$> do
           sysTmpDir <- QC.run Dir.getTemporaryDirectory
@@ -641,26 +652,32 @@ prop_sequential bss =
         (hist, _model, res) <- runCommands sm' cmds
         prettyCommands sm' hist
           $ checkCommandNames cmds
+          $ QC.tabulate "Tags" (map show $ tagEvents ops (execCmds ops cmds))
           $ res QC.=== Ok
-  where
-    bs  = error "InMemoryBackingStore not used during command generation"
-    shfs = error "SomeHasFS not used during command generation"
 
-    ops :: Operations K V D
-    ops = Operations {
-        applyDiff
-      , emptyValues
-      , lookupKeysRange = \prev n vs ->
-          case prev of
-            Nothing ->
-              mapLedgerTables (rangeRead n) vs
-            Just ks ->
-              zipLedgerTables (rangeRead' n) ks vs
-      , lookupKeys    = zipLedgerTables readKeys
-      , genDiff
-      , genRangeQuery
-      , genKeys       = const QC.arbitrary
-      }
+bsUnused :: BackingStoreWithHandleRegistry IO K V D
+bsUnused = error "Backing store not used during command generation"
+
+shfsUnused :: SomeHasFS IO
+shfsUnused = error "SomeHasFS not used during command generation"
+
+operations :: Operations K V D
+operations = Operations {
+      applyDiff
+    , emptyValues
+    , lookupKeysRange = \prev n vs ->
+        case prev of
+          Nothing ->
+            mapLedgerTables (rangeRead n) vs
+          Just ks ->
+            zipLedgerTables (rangeRead' n) ks vs
+    , lookupKeys    = zipLedgerTables readKeys
+    , genDiff
+    , genRangeQuery
+    , genKeys       = const QC.arbitrary
+    , valuesLength
+    }
+  where
 
     applyDiff :: V -> D -> V
     applyDiff = zipLedgerTables rawApplyDiffs
@@ -711,6 +728,9 @@ prop_sequential bss =
           <$> (($) <$> QC.elements [const Nothing, Just] <*> QC.arbitrary)
           <*> QC.arbitrary
 
+    valuesLength :: V -> Int
+    valuesLength (SimpleLedgerTables (ApplyValuesMK (HD.UtxoValues m))) = Map.size m
+
 type K = LedgerTables (SimpleLedgerState Int Int) KeysMK
 type V = LedgerTables (SimpleLedgerState Int Int) ValuesMK
 type D = LedgerTables (SimpleLedgerState Int Int) DiffMK
@@ -731,6 +751,89 @@ deriving newtype instance QC.Arbitrary (ApplyMapKind' mk k v)
                               (SimpleLedgerState k v)
                               (ApplyMapKind' mk)
                             )
+
+{------------------------------------------------------------------------------
+  Labelling
+------------------------------------------------------------------------------}
+
+data Tag =
+    MinimumReadSize Int
+  | MaximumReadSize Int
+  deriving (Show, Eq)
+
+type EventPred keys values diff = Label.Predicate (Event keys values diff Symbolic) Tag
+
+minimum :: forall a b. Ord b => (a -> Maybe b) -> Label.Predicate a b
+minimum f = getDown <$> Label.maximum (fmap Down . f)
+
+tagEvents ::
+     forall keys values diff.
+     Operations keys values diff
+  -> [Event keys values diff Symbolic]
+  -> [Tag]
+tagEvents ops = Label.classify [
+      tagMinimumReads
+    , tagMaximumReads
+    ]
+  where
+    tagMinimumReads :: EventPred keys values diff
+    tagMinimumReads = fmap MinimumReadSize $ minimum $ \ev ->
+      case (cmd ev, mockResp ev) of
+        (At (BSVHRead _n _ks), Resp (Right (Values vs))) -> Just $ valuesLength ops vs
+        _ -> Nothing
+
+    tagMaximumReads :: EventPred keys values diff
+    tagMaximumReads = fmap MaximumReadSize $ Label.maximum $ \ev ->
+      case (cmd ev, mockResp ev) of
+        (At (BSVHRead _n _ks), Resp (Right (Values vs))) -> Just $ valuesLength ops vs
+        _ -> Nothing
+
+
+execCmd ::
+     Operations keys values diff
+  -> Model values Symbolic
+  -> QSM.Command (At (Cmd keys values diff)) (At (Resp keys values diff))
+  -> Event keys values diff Symbolic
+execCmd ops model (QSM.Command cmd resp _vars) =
+    lockstep ops model cmd resp
+
+execCmds ::
+     forall keys values diff.
+     Operations keys values diff
+  -> QSM.Commands (At (Cmd keys values diff)) (At (Resp keys values diff))
+  -> [Event keys values diff Symbolic]
+execCmds ops = \(QSM.Commands cs) -> go (initModel ops) cs
+  where
+    go ::
+         Model values Symbolic
+      -> [QSM.Command (At (Cmd keys values diff)) (At (Resp keys values diff))]
+      -> [Event keys values diff Symbolic]
+    go _ []       = []
+    go m (c : cs) = e : go (after e) cs
+      where
+        e = execCmd ops m c
+
+{------------------------------------------------------------------------------
+  Inspecting the labelling function
+------------------------------------------------------------------------------}
+
+showLabelledExamples :: Operations K V D -> Maybe Int -> IO ()
+showLabelledExamples ops mReplay = do
+    replaySeed <- case mReplay of
+                    Nothing   -> getStdRandom $ randomR (1, 999999)
+                    Just seed -> return seed
+
+    putStrLn $ "Using replaySeed " ++ show replaySeed
+
+    let args = QC.stdArgs {
+            QC.maxSuccess = 10000
+          , QC.replay     = Just (QC.mkQCGen replaySeed, 0)
+          }
+
+    QC.labelledExamplesWith args $
+      forAllCommands (sm ops shfsUnused bsUnused) Nothing $ \cmds ->
+        repeatedly QC.collect (tagEvents ops . execCmds ops $ cmds) $
+          QC.property True
 
 {------------------------------------------------------------------------------
   Aux
