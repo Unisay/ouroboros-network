@@ -70,7 +70,8 @@ deriving via OnlyCheckWhnfNamed "BackingStore" (BackingStore m keys values diff)
   instance NoThunks (BackingStore m keys values diff)
 
 newtype BackingStorePath = BackingStorePath FS.FsPath
-  deriving newtype (Show, Eq, NoThunks)
+  deriving stock (Show, Eq)
+  deriving newtype NoThunks
 
 -- | An ephemeral handle to an immutable value of the entire database
 --

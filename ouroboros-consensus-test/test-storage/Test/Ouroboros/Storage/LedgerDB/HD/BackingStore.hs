@@ -5,10 +5,10 @@
 {-# LANGUAGE DerivingStrategies         #-}
 {-# LANGUAGE FlexibleContexts           #-}
 {-# LANGUAGE FlexibleInstances          #-}
+{-# LANGUAGE GADTs                      #-}
 {-# LANGUAGE GeneralisedNewtypeDeriving #-}
 {-# LANGUAGE LambdaCase                 #-}
 {-# LANGUAGE NamedFieldPuns             #-}
-{-# LANGUAGE OverloadedStrings          #-}
 {-# LANGUAGE RankNTypes                 #-}
 {-# LANGUAGE RecordWildCards            #-}
 {-# LANGUAGE ScopedTypeVariables        #-}
@@ -35,9 +35,12 @@ import           Data.Functor.Classes
 import           Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import           Data.Maybe (fromJust)
+import qualified Data.Set as Set
 import           GHC.Generics (Generic)
 import qualified System.Directory as Dir
 import           System.IO.Temp (createTempDirectory)
+
+import           Cardano.Binary (FromCBOR (..), ToCBOR (..))
 
 import           Test.QuickCheck (Gen)
 import qualified Test.QuickCheck as QC
@@ -54,6 +57,7 @@ import           Ouroboros.Consensus.Ledger.Basics ()
 import           Ouroboros.Consensus.Storage.FS.API hiding (Handle)
 import           Ouroboros.Consensus.Storage.FS.API.Types hiding (Handle)
 import           Ouroboros.Consensus.Storage.FS.IO (ioHasFS)
+import qualified Ouroboros.Consensus.Storage.LedgerDB.HD as HD
 import qualified Ouroboros.Consensus.Storage.LedgerDB.HD.BackingStore as BS
 import           Ouroboros.Consensus.Storage.LedgerDB.OnDisk
 import           Ouroboros.Consensus.Util.IOLike
@@ -135,11 +139,13 @@ runMockState (MockState t) = runState (runExceptT t)
 -- pass in a dictionary of functions that defines how these types interact.
 -- Example: @'applyDiff'@ defines how to apply a @diff@ to @values@.
 data Operations keys values diff = Operations {
-    applyDiff   :: diff -> values -> values
-  , emptyValues :: values
-  , takeValues  :: Int -> values -> values
-  , splitValues:: keys -> values -> (values, values)
-  , lookupKeys  :: keys -> values -> values
+    applyDiff       :: values -> diff -> values
+  , emptyValues     :: values
+  , lookupKeysRange :: Maybe keys -> Int -> values -> values
+  , lookupKeys      :: keys -> values -> values
+  , genDiff         :: Model values Symbolic -> Gen diff
+  , genRangeQuery   :: Model values Symbolic -> Gen (BS.RangeQuery keys)
+  , genKeys         :: Model values Symbolic -> Gen keys
   }
 
 {------------------------------------------------------------------------------
@@ -203,7 +209,7 @@ mBSWrite ops sl d = do
   when (seqNo > NotOrigin sl) $
     throwError $ MockErrNoMonotonicSeqNo seqNo (NotOrigin sl)
   modify (\m -> m {
-      backingValues = applyDiff ops d vs
+      backingValues = applyDiff ops vs d
     , backingSeqNo = NotOrigin sl
     })
 
@@ -224,7 +230,7 @@ mBSVHClose h = do
   void $ mGuardBSVHClosed h
   vhs <- gets openValueHandles
   modify (\m -> m {
-    openValueHandles = Map.delete h vhs
+    openValueHandles = Map.adjust (\vh -> vh { vhIsClosed = True }) h vhs
   })
 
 -- | Perform a range read on a backing store value handle.
@@ -238,11 +244,7 @@ mBSVHRangeRead ops h BS.RangeQuery{rqPrev, rqCount} = do
   vh <- mGuardBSVHClosed h
   let
     vs = values vh
-  case rqPrev of
-    Nothing ->
-      pure $ emptyValues ops
-    Just ks ->
-      pure $ takeValues ops rqCount $ snd $ splitValues ops ks vs
+  pure $ lookupKeysRange ops rqPrev rqCount vs
 
 -- | Perform a regular read on a backing store value handle
 mBSVHRead ::
@@ -525,9 +527,48 @@ symbolicResp ops m c = At <$> traverse (const genSym) resp
 ------------------------------------------------------------------------------}
 
 generator ::
-     Model values Symbolic
+     forall keys values diff.
+     Operations keys values diff
+  -> Model values Symbolic
   -> Maybe (Gen (Cmd keys values diff :@ Symbolic))
-generator _ = Nothing
+generator ops model@(Model mock hs) = Just $ QC.oneof $
+      withoutHandle ++ withHandle
+  where
+    withoutHandle :: [Gen (Cmd keys values diff :@ Symbolic)]
+    withoutHandle = fmap At <$> [
+          pure BSClose
+        , BSCopy <$> genBackingStorePath
+        , pure BSValueHandle
+        , BSWrite <$> genSlotNo <*> genDiff ops model
+        ]
+
+    withHandle :: [Gen (Cmd keys values diff :@ Symbolic)]
+    withHandle
+      | null hs   = []
+      | otherwise = fmap At <$> [
+            BSVHClose <$> genHandle
+          , BSVHRangeRead <$> genHandle <*> genRangeQuery ops model
+          , BSVHRead <$> genHandle <*> genKeys ops model
+          ]
+
+    genHandle :: Gen (Reference Handle Symbolic)
+    genHandle = QC.elements (map fst hs)
+
+    genBackingStorePath :: Gen BS.BackingStorePath
+    genBackingStorePath = do
+      file <- genBSPFile
+      pure . BS.BackingStorePath . mkFsPath $ ["copies", file]
+
+    genBSPFile :: Gen String
+    genBSPFile = QC.elements ["a", "b", "c", "d"]
+
+    -- | FIXME: Generate slot numbers in past?
+    genSlotNo :: Gen SlotNo
+    genSlotNo = do
+        n :: Int <- QC.choose (-5, 5)
+        pure $ maybe 0 (+ fromIntegral n) (withOriginToMaybe seqNo)
+      where
+        seqNo = backingSeqNo mock
 
 shrinker ::
      Model values Symbolic
@@ -554,16 +595,28 @@ sm ops sfs bs = StateMachine {
     , precondition  = precondition
     , postcondition = postcondition ops
     , invariant     = Nothing
-    , generator     = generator
+    , generator     = generator ops
     , shrinker      = shrinker
     , semantics     = semantics sfs bs
     , mock          = symbolicResp ops
     , cleanup       = noCleanup
     }
 
-precondition :: Model values Symbolic -> Cmd keys values diff :@ Symbolic -> Logic
-precondition (Model _ hs) (At c) =
+precondition ::
+     Model values Symbolic
+  -> Cmd keys values diff :@ Symbolic
+  -> Logic
+precondition (Model mock hs) (At c) =
     forall (toList c) (`member` map fst hs)
+  -- FIXME: Should we liberalise the precondition?
+  .&& prec
+  where
+    prec = case c of
+      BSClose      -> Boolean False
+      BSCopy bsp   -> bsp `notMember` copies mock
+      BSWrite sl _ -> backingSeqNo mock .<= NotOrigin sl
+      BSVHClose _  -> Boolean False
+      _            -> Boolean True
 
 {------------------------------------------------------------------------------
   Running the tests
@@ -571,30 +624,113 @@ precondition (Model _ hs) (At c) =
 
 prop_sequential :: BackingStoreSelector IO -> QC.Property
 prop_sequential bss =
-    forAllCommands (sm ops sfs bs) Nothing $ \cmds ->
+    forAllCommands (sm ops shfs bs) Nothing $ \cmds ->
       QC.monadicIO $ do
-        sfs' <- SomeHasFS . ioHasFS . MountPoint <$> do
+        hasFS@(SomeHasFS hasFS') <- SomeHasFS . ioHasFS . MountPoint <$> do
           sysTmpDir <- QC.run Dir.getTemporaryDirectory
           QC.run $ createTempDirectory sysTmpDir "QSM"
+        QC.run $ createDirectory hasFS' (mkFsPath ["copies"])
         LedgerBackingStore bs' <- QC.run $
-          newBackingStore @IO @(SimpleLedgerState Int Int) nullTracer bss sfs' polyEmptyLedgerTables
-        bs'' <- QC.run $ withHandleRegistry bs'
-        let sm' = sm ops sfs' bs''
+          newBackingStore @IO @(SimpleLedgerState Int Int)
+            nullTracer
+            bss
+            hasFS
+            polyEmptyLedgerTables
+        bsWHR <- QC.run $ withHandleRegistry bs'
+        let sm' = sm ops hasFS bsWHR
         (hist, _model, res) <- runCommands sm' cmds
         prettyCommands sm' hist
           $ checkCommandNames cmds
           $ res QC.=== Ok
   where
+    bs  = error "InMemoryBackingStore not used during command generation"
+    shfs = error "SomeHasFS not used during command generation"
+
+    ops :: Operations K V D
     ops = Operations {
-        applyDiff = undefined
-      , emptyValues = undefined
-      , takeValues = undefined
-      , splitValues = undefined
-      , lookupKeys = undefined
+        applyDiff
+      , emptyValues
+      , lookupKeysRange = \prev n vs ->
+          case prev of
+            Nothing ->
+              mapLedgerTables (rangeRead n) vs
+            Just ks ->
+              zipLedgerTables (rangeRead' n) ks vs
+      , lookupKeys    = zipLedgerTables readKeys
+      , genDiff
+      , genRangeQuery
+      , genKeys       = const QC.arbitrary
       }
 
-    bs  = error "InMemoryBackingStore not used during command generation"
-    sfs = error "SomeHasFS not used during command generation"
+    applyDiff :: V -> D -> V
+    applyDiff = zipLedgerTables rawApplyDiffs
+
+    emptyValues :: V
+    emptyValues = polyEmptyLedgerTables
+
+    rangeRead :: Int -> ApplyMapKind ValuesMK k v -> ApplyMapKind ValuesMK k v
+    rangeRead n (ApplyValuesMK (HD.UtxoValues vs)) =
+      ApplyValuesMK $ HD.UtxoValues $ Map.take n vs
+
+    rangeRead' ::
+         Ord k
+      => Int
+      -> ApplyMapKind KeysMK k v
+      -> ApplyMapKind ValuesMK k v
+      -> ApplyMapKind ValuesMK k v
+    rangeRead' n ksmk vsmk =
+        case Set.lookupMax ks of
+          Nothing -> ApplyValuesMK $ HD.UtxoValues Map.empty
+          Just  k -> ApplyValuesMK $ HD.UtxoValues $
+            Map.take n $ snd $ Map.split k vs
+      where
+        ApplyKeysMK (HD.UtxoKeys ks)     = ksmk
+        ApplyValuesMK (HD.UtxoValues vs) = vsmk
+
+    readKeys ::
+         Ord k
+      => ApplyMapKind KeysMK k v
+      -> ApplyMapKind ValuesMK k v
+      -> ApplyMapKind ValuesMK k v
+    readKeys (ApplyKeysMK ks) (ApplyValuesMK vs) =
+      ApplyValuesMK $ HD.restrictValues vs ks
+
+    -- FIXME: Generate unhappy paths, like
+    -- * Delete key-value pairs that are not in the backing values.
+    -- * Add key-value pairs that are already in the backing values.
+    genDiff :: Model V Symbolic -> Gen D
+    genDiff (Model mock _) = do
+        d <- HD.differenceUtxoValues vs <$> QC.arbitrary
+        pure $ SimpleLedgerTables (ApplyDiffMK d)
+      where
+        SimpleLedgerTables (ApplyValuesMK vs) = backingValues mock
+
+    genRangeQuery :: Model V Symbolic -> Gen (BS.RangeQuery K)
+    genRangeQuery _ =
+        BS.RangeQuery
+          <$> (($) <$> QC.elements [const Nothing, Just] <*> QC.arbitrary)
+          <*> QC.arbitrary
+
+type K = LedgerTables (SimpleLedgerState Int Int) KeysMK
+type V = LedgerTables (SimpleLedgerState Int Int) ValuesMK
+type D = LedgerTables (SimpleLedgerState Int Int) DiffMK
+
+deriving newtype instance (Ord k, QC.Arbitrary k, QC.Arbitrary v)
+                       => QC.Arbitrary (HD.UtxoValues k v)
+
+deriving newtype instance (Ord k, QC.Arbitrary k)
+                       => QC.Arbitrary (HD.UtxoKeys k v)
+
+instance (Ord k, QC.Arbitrary k, QC.Arbitrary v)
+      => QC.Arbitrary (KeysMK k v) where
+  arbitrary = ApplyKeysMK <$> QC.arbitrary
+
+deriving newtype instance QC.Arbitrary (ApplyMapKind' mk k v)
+                       => QC.Arbitrary (
+                            LedgerTables
+                              (SimpleLedgerState k v)
+                              (ApplyMapKind' mk)
+                            )
 
 {------------------------------------------------------------------------------
   Aux
@@ -693,4 +829,7 @@ instance (Ord k, Eq v)
 
 deriving newtype instance NoThunks (mk k v)
                => NoThunks (LedgerTables (SimpleLedgerState k v) mk)
-deriving anyclass instance SufficientSerializationForAnyBackingStore (SimpleLedgerState k v)
+
+instance (ToCBOR k, FromCBOR k, ToCBOR v, FromCBOR v)
+      => SufficientSerializationForAnyBackingStore (SimpleLedgerState k v) where
+  codecLedgerTables = SimpleLedgerTables $ CodecMK toCBOR toCBOR fromCBOR fromCBOR
