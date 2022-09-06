@@ -468,7 +468,7 @@ instance CardanoHardForkConstraints c
       [ (NodeToNodeV_7, CardanoNodeToNodeVersion5)
       , (NodeToNodeV_8, CardanoNodeToNodeVersion5)
       , (NodeToNodeV_9, CardanoNodeToNodeVersion6)
-      , (NodeToNodeV_10, CardanoNodeToNodeVersion6)
+      , (NodeToNodeV_11, CardanoNodeToNodeVersion6)
       ]
 
   supportedNodeToClientVersions _ = Map.fromList $

@@ -41,7 +41,7 @@ data NodeToNodeVersion
     -- ^ Changes:
     --
     -- * Enable @CardanoNodeToNodeVersion6@, i.e., Babbage
-    | NodeToNodeV_10
+    | NodeToNodeV_11
     -- ^ Changes:
     --
     -- * Enable full duplex connections.
@@ -56,12 +56,12 @@ nodeToNodeVersionCodec = CodecCBORTerm { encodeTerm, decodeTerm }
     encodeTerm NodeToNodeV_7  = CBOR.TInt 7
     encodeTerm NodeToNodeV_8  = CBOR.TInt 8
     encodeTerm NodeToNodeV_9  = CBOR.TInt 9
-    encodeTerm NodeToNodeV_10 = CBOR.TInt 10
+    encodeTerm NodeToNodeV_11 = CBOR.TInt 11
 
     decodeTerm (CBOR.TInt 7) = Right NodeToNodeV_7
     decodeTerm (CBOR.TInt 8) = Right NodeToNodeV_8
     decodeTerm (CBOR.TInt 9) = Right NodeToNodeV_9
-    decodeTerm (CBOR.TInt 10) = Right NodeToNodeV_10
+    decodeTerm (CBOR.TInt 11) = Right NodeToNodeV_11
     decodeTerm (CBOR.TInt n) = Left ( T.pack "decode NodeToNodeVersion: unknonw tag: "
                                         <> T.pack (show n)
                                     , Just n
