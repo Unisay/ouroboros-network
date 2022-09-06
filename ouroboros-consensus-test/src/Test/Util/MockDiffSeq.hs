@@ -1,10 +1,12 @@
-{-# LANGUAGE DeriveAnyClass           #-}
-{-# LANGUAGE DeriveGeneric            #-}
-{-# LANGUAGE DerivingVia              #-}
-{-# LANGUAGE RankNTypes               #-}
-{-# LANGUAGE ScopedTypeVariables      #-}
-{-# LANGUAGE StandaloneDeriving       #-}
-{-# LANGUAGE StandaloneKindSignatures #-}
+{-# LANGUAGE DeriveAnyClass             #-}
+{-# LANGUAGE DeriveGeneric              #-}
+{-# LANGUAGE DerivingVia                #-}
+{-# LANGUAGE GeneralisedNewtypeDeriving #-}
+{-# LANGUAGE LambdaCase                 #-}
+{-# LANGUAGE RankNTypes                 #-}
+{-# LANGUAGE ScopedTypeVariables        #-}
+{-# LANGUAGE StandaloneDeriving         #-}
+{-# LANGUAGE StandaloneKindSignatures   #-}
 
 module Test.Util.MockDiffSeq (
     -- * Types
@@ -15,10 +17,19 @@ module Test.Util.MockDiffSeq (
   , MockValues (..)
     -- * Diff sequence operations
   , mFlush
+  , mForwardValues
   , mForwardValuesAndKeys
   , mPush
   , mRollback
   , mTotalDiff
+    -- * Utility functions
+  , mDiffKeys
+  , mFromListDeletes
+  , mFromListInserts
+  , mFromListKeys
+  , mFromListValues
+  , mLength
+  , mRestrictValues
   ) where
 
 import           Control.DeepSeq
@@ -48,7 +59,7 @@ newtype MockDiffSeq k v = MockDiffSeq (Seq (MockSlotNo, MockDiff k v))
 
 -- | Simple diff datatype where @Nothing@ signals a delete, and @Just x@
 -- signals an insert of @x@.
-newtype MockDiff k v = MockDiff (Map k [Maybe v])
+newtype MockDiff k v = MockDiff (Map k (Seq (Maybe v)))
   deriving stock (Show, Generic)
   deriving anyclass NFData
 
@@ -62,11 +73,18 @@ newtype MockKeys k v = MockKeys (Set k)
 
 newtype MockSlotNo = MockSlotNo Int
   deriving stock (Show, Eq, Ord, Generic)
+  deriving newtype Num
   deriving anyclass NFData
 
 {------------------------------------------------------------------------------
   Monoid instances
 ------------------------------------------------------------------------------}
+
+instance Ord k => Semigroup (MockDiffSeq k v) where
+  MockDiffSeq sq1 <> MockDiffSeq sq2 = MockDiffSeq $ sq1 <> sq2
+
+instance Ord k => Monoid (MockDiffSeq k v) where
+  mempty = MockDiffSeq mempty
 
 deriving via Max Int instance Semigroup MockSlotNo
 deriving via Max Int instance Monoid MockSlotNo
@@ -76,7 +94,7 @@ instance Ord k => Semigroup (MockDiff k v) where
     MapMerge.merge
       MapMerge.preserveMissing
       MapMerge.preserveMissing
-      (MapMerge.zipWithMatched (\_ x y -> x ++ y))
+      (MapMerge.zipWithMatched (\_ x y -> x <> y))
       d1
       d2
 
@@ -125,7 +143,7 @@ mRollback n (MockDiffSeq sq)
     m = Seq.length sq - n
 
 mForwardValuesAndKeys ::
-     forall k v. Ord k
+     Ord k
   => MockValues k v
   -> MockKeys k v
   -> MockDiff k v
@@ -134,15 +152,54 @@ mForwardValuesAndKeys vs0@(MockValues vs) (MockKeys ks) (MockDiff d) =
     mForwardValues
       vs0
       (MockDiff $ d `Map.restrictKeys` (Map.keysSet vs `Set.union` ks))
+
+mForwardValues ::
+     Ord k
+  => MockValues k v
+  -> MockDiff k v
+  -> MockValues k v
+mForwardValues (MockValues m1) (MockDiff m2) = MockValues $
+  MapMerge.merge
+    MapMerge.preserveMissing
+    (MapMerge.mapMaybeMissing (const lastSeq))
+    (MapMerge.zipWithMaybeMatched (\_ _ -> lastSeq))
+    m1
+    m2
   where
-    mForwardValues :: MockValues k v -> MockDiff k v -> MockValues k v
-    mForwardValues (MockValues m1) (MockDiff m2) = MockValues $
-      MapMerge.merge
-        MapMerge.preserveMissing
-        (MapMerge.mapMaybeMissing (\_ x -> last x))
-        (MapMerge.zipWithMaybeMatched (\_ _ x -> last x))
-        m1
-        m2
+    lastSeq = \case
+      Seq.Empty   -> error "lastSeq: sequence is empty"
+      _ Seq.:|> x -> x
 
 mTotalDiff :: Ord k => MockDiffSeq k v -> MockDiff k v
 mTotalDiff (MockDiffSeq sq) = snd $ fold sq
+
+{------------------------------------------------------------------------------
+  Utility functions
+------------------------------------------------------------------------------}
+
+mLength :: MockDiffSeq k v -> Int
+mLength (MockDiffSeq sq) = Seq.length sq
+
+mDiffKeys :: MockDiff k v -> MockKeys k v
+mDiffKeys (MockDiff m) = MockKeys $ Map.keysSet m
+
+mRestrictValues :: Ord k => MockValues k v -> MockKeys k v -> MockValues k v
+mRestrictValues (MockValues m) (MockKeys s) = MockValues $ m `Map.restrictKeys` s
+
+mSingletonDelete :: v -> Seq (Maybe v)
+mSingletonDelete = Seq.singleton . const Nothing
+
+mSingletonInsert :: v -> Seq (Maybe v)
+mSingletonInsert = Seq.singleton . Just
+
+mFromListDeletes :: Ord k => [(k, v)] -> MockDiff k v
+mFromListDeletes = MockDiff . Map.fromList . fmap (second mSingletonDelete)
+
+mFromListInserts :: Ord k => [(k, v)] -> MockDiff k v
+mFromListInserts = MockDiff . Map.fromList . fmap (second mSingletonInsert)
+
+mFromListKeys :: Ord k => [k] -> MockKeys k v
+mFromListKeys = MockKeys . Set.fromList
+
+mFromListValues :: Ord k => [(k, v)] -> MockValues k v
+mFromListValues = MockValues . Map.fromList
