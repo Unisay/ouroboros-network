@@ -42,6 +42,7 @@ module Ouroboros.Consensus.Cardano.Node (
   , pattern CardanoNodeToNodeVersion4
   , pattern CardanoNodeToNodeVersion5
   , pattern CardanoNodeToNodeVersion6
+  , pattern CardanoNodeToNodeVersion7
   ) where
 
 import qualified Codec.CBOR.Decoding as CBOR
