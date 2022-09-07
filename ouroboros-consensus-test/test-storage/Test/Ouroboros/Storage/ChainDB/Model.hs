@@ -377,7 +377,7 @@ advanceCurSlot
   -> Model blk -> Model blk
 advanceCurSlot curSlot m = m { currentSlot = curSlot `max` currentSlot m }
 
-addBlock :: forall blk. (Eq blk, LedgerSupportsProtocol blk)
+addBlock :: forall blk. LedgerSupportsProtocol blk
          => TopLevelConfig blk
          -> blk
          -> Model blk -> Model blk
@@ -451,7 +451,6 @@ addBlock cfg blk m = Model {
                (Chain.foldChain (\s b -> Set.insert (blockHash b) s))
                (valid m)
                (map fst consideredCandidates ++ [newChain])
-               -- (takeWhile (not . Chain.isPrefixOf newChain)
 
 -- = Getting the valid blocks
 --
