@@ -306,6 +306,18 @@ data ChainDB m blk = ChainDB {
         -> BlockComponent blk b
         -> m (Follower m blk b)
 
+      -- It might seem natural to have this function also return whether the
+      -- ChainDB knows that a block is valid, thereby subsuming the @getIsValid@
+      -- function and simplifying the API. However, this adds the overhead of
+      -- checking whether the block is valid for blocks that are not known to be
+      -- invalid that does not give useful information to current
+      -- clients (ChainSync), since they are only interested in whether a block
+      -- is known to be invalid.
+      --
+      -- In particular, this affects the watcher in `bracketChainSyncClient`,
+      -- which rechecks the blocks in all candidate chains whenever a new
+      -- invalid block is detected. These blocks are likely to be valid.
+
       -- | Function to check whether a block is known to be invalid.
       --
       -- Blocks unknown to the ChainDB will result in 'False'.
