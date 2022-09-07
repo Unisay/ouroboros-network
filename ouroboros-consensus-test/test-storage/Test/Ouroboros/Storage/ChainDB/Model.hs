@@ -450,7 +450,8 @@ addBlock cfg blk m = Model {
     valid' = foldl
                (Chain.foldChain (\s b -> Set.insert (blockHash b) s))
                (valid m)
-               (takeWhile (not . Chain.isPrefixOf newChain) (map fst consideredCandidates) ++ [newChain])
+               (map fst consideredCandidates ++ [newChain])
+               -- (takeWhile (not . Chain.isPrefixOf newChain)
 
 -- = Getting the valid blocks
 --
