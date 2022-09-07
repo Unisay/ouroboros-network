@@ -549,7 +549,7 @@ addBlock cfg blk m = Model {
 --    the ones known by the real algorithm. See the note
 --    Ouroboros.Storage.ChainDB.StateMachine.[Invalid blocks].
 
-addBlocks :: (Eq blk, LedgerSupportsProtocol blk)
+addBlocks :: LedgerSupportsProtocol blk
           => TopLevelConfig blk
           -> [blk]
           -> Model blk -> Model blk
@@ -557,7 +557,7 @@ addBlocks cfg = repeatedly (addBlock cfg)
 
 -- | Wrapper around 'addBlock' that returns an 'AddBlockPromise'.
 addBlockPromise
-  :: forall m blk. (Eq blk, LedgerSupportsProtocol blk, MonadSTM m)
+  :: forall m blk. (LedgerSupportsProtocol blk, MonadSTM m)
   => TopLevelConfig blk
   -> blk
   -> Model blk
