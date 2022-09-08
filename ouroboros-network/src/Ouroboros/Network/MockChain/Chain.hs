@@ -40,6 +40,7 @@ module Ouroboros.Network.MockChain.Chain
   , drop
   , length
   , null
+  , takeWhileChain
     -- ** Update type and operations
   , ChainUpdate (..)
   , addBlock
@@ -86,6 +87,15 @@ data Chain block = Genesis | Chain block :> block
   deriving (Eq, Ord, Show, Functor)
 
 infixl 5 :>
+
+takeWhileChain :: (blk -> Bool) -> Chain blk -> Chain blk
+takeWhileChain p c = go Genesis (toOldestFirst c)
+  where
+    go acc [] = acc
+    go acc (b : bs) =
+      if p b
+      then go (acc :> b) bs
+      else acc
 
 foldChain :: (a -> b -> a) -> a -> Chain b -> a
 foldChain _blk gen Genesis  = gen

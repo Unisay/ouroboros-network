@@ -377,7 +377,7 @@ advanceCurSlot
   -> Model blk -> Model blk
 advanceCurSlot curSlot m = m { currentSlot = curSlot `max` currentSlot m }
 
-addBlock :: forall blk. LedgerSupportsProtocol blk
+addBlock :: forall blk. (Eq blk, LedgerSupportsProtocol blk)
          => TopLevelConfig blk
          -> blk
          -> Model blk -> Model blk
@@ -433,8 +433,7 @@ addBlock cfg blk m = Model {
       immutableChainHashes `isPrefixOf`
       map blockHash (Chain.toOldestFirst fork)
 
-    consideredCandidates = filter (extendsImmutableChain . fst)
-      $ candidates
+    consideredCandidates = filter (extendsImmutableChain . fst) candidates
 
     newChain  :: Chain blk
     newLedger :: ExtLedgerState blk
@@ -450,7 +449,8 @@ addBlock cfg blk m = Model {
     valid' = foldl
                (Chain.foldChain (\s b -> Set.insert (blockHash b) s))
                (valid m)
-               (map fst consideredCandidates ++ [newChain])
+               (takeWhile (not . Chain.isPrefixOf newChain)
+                (map fst consideredCandidates) ++ [newChain])
 
 -- = Getting the valid blocks
 --
@@ -549,7 +549,7 @@ addBlock cfg blk m = Model {
 --    the ones known by the real algorithm. See the note
 --    Ouroboros.Storage.ChainDB.StateMachine.[Invalid blocks].
 
-addBlocks :: LedgerSupportsProtocol blk
+addBlocks :: (Eq blk, LedgerSupportsProtocol blk)
           => TopLevelConfig blk
           -> [blk]
           -> Model blk -> Model blk
@@ -557,7 +557,7 @@ addBlocks cfg = repeatedly (addBlock cfg)
 
 -- | Wrapper around 'addBlock' that returns an 'AddBlockPromise'.
 addBlockPromise
-  :: forall m blk. (LedgerSupportsProtocol blk, MonadSTM m)
+  :: forall m blk. (Eq blk, LedgerSupportsProtocol blk, MonadSTM m)
   => TopLevelConfig blk
   -> blk
   -> Model blk
@@ -853,6 +853,7 @@ chains bs = go Chain.Genesis
     fwd :: Map (ChainHash blk) (Map (HeaderHash blk) blk)
     fwd = successors (Map.elems bs)
 
+
 validChains :: forall blk. LedgerSupportsProtocol blk
             => TopLevelConfig blk
             -> Model blk
@@ -876,8 +877,11 @@ validChains cfg m bs =
     -- first, which results in the valid chain A->B', which is then chosen
     -- over the equally preferable A->B as it will be the first in the list
     -- after a stable sort.
-    sortChains $ chains bs
+    sortChains $ pruneKnownInvalid (invalid m) <$> chains bs
   where
+    pruneKnownInvalid invalidBlocks chain =
+      Chain.takeWhileChain (\b -> blockHash b `Map.notMember` invalidBlocks) chain
+
     sortChains :: [Chain blk] -> [Chain blk]
     sortChains =
       sortBy $ flip (
