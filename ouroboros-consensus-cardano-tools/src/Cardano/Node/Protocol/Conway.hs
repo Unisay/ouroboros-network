@@ -1,4 +1,4 @@
-{-# LANGUAGE EmptyDataDeriving   #-}
+{-# LANGUAGE EmptyDataDeriving #-}
 
 -- TODO DUPLICATE? -- as-if adapted? from: cardano-node/src/Cardano/Node/Protocol/Conway.hs
 
