@@ -525,7 +525,7 @@ instance Eq IsValidResult where
       realMatchesModel real model = case (real, model) of
         (Just x1, Just x2) -> x1 == x2
         (Nothing, Nothing) -> True
-        (Nothing, Just _)  -> True
+        (Nothing, Just _)  -> True -- False
         (Just _,  Nothing) -> False
 
 {-------------------------------------------------------------------------------
