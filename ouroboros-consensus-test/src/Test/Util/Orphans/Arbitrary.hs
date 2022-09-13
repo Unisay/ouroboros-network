@@ -1,15 +1,16 @@
-{-# LANGUAGE DataKinds            #-}
-{-# LANGUAGE DerivingVia          #-}
-{-# LANGUAGE FlexibleContexts     #-}
-{-# LANGUAGE FlexibleInstances    #-}
-{-# LANGUAGE GADTs                #-}
-{-# LANGUAGE NumericUnderscores   #-}
-{-# LANGUAGE PolyKinds            #-}
-{-# LANGUAGE ScopedTypeVariables  #-}
-{-# LANGUAGE StandaloneDeriving   #-}
-{-# LANGUAGE TypeApplications     #-}
-{-# LANGUAGE TypeOperators        #-}
-{-# LANGUAGE UndecidableInstances #-}
+{-# LANGUAGE DataKinds                  #-}
+{-# LANGUAGE DerivingVia                #-}
+{-# LANGUAGE FlexibleContexts           #-}
+{-# LANGUAGE FlexibleInstances          #-}
+{-# LANGUAGE GADTs                      #-}
+{-# LANGUAGE GeneralisedNewtypeDeriving #-}
+{-# LANGUAGE NumericUnderscores         #-}
+{-# LANGUAGE PolyKinds                  #-}
+{-# LANGUAGE ScopedTypeVariables        #-}
+{-# LANGUAGE StandaloneDeriving         #-}
+{-# LANGUAGE TypeApplications           #-}
+{-# LANGUAGE TypeOperators              #-}
+{-# LANGUAGE UndecidableInstances       #-}
 {-# OPTIONS_GHC -Wno-orphans #-}
 
 module Test.Util.Orphans.Arbitrary (
@@ -26,6 +27,11 @@ import           Data.SOP.Strict
 import           Data.Time
 import           Data.Word (Word64)
 import           Test.QuickCheck hiding (Fixed (..))
+
+import qualified Data.FingerTree.RootMeasured.Strict as RMFT
+import           Data.Map.Diff.Strict (Diff, DiffHistory, singletonDelete,
+                     singletonInsert)
+import qualified Data.Map.Diff.Strict as MapDiff
 
 import           Ouroboros.Consensus.Block
 import           Ouroboros.Consensus.BlockchainTime
@@ -55,7 +61,12 @@ import           Ouroboros.Consensus.HardFork.Combinator.Util.Functors
 import           Ouroboros.Consensus.Storage.ImmutableDB.Chunks.Internal
                      (ChunkNo (..), ChunkSize (..), RelativeSlot (..))
 import           Ouroboros.Consensus.Storage.ImmutableDB.Chunks.Layout
+import           Ouroboros.Consensus.Storage.LedgerDB.HD.DiffSeq
+                     (InternalMeasure (..), RootMeasure (..))
+import qualified Ouroboros.Consensus.Storage.LedgerDB.HD.DiffSeq as DS
+                     (Length (..), SlotNo (..))
 
+import           Test.Util.Orphans.Slotting.Arbitrary ()
 import           Test.Util.Time
 
 minNumCoreNodes :: Word64
@@ -397,3 +408,33 @@ instance Arbitrary (SomeQuery (BlockQuery blk))
   arbitrary = do
     SomeQuery someBlockQuery <- arbitrary
     return (SomeQuery (BlockQuery someBlockQuery))
+
+{------------------------------------------------------------------------------
+  Diffs
+------------------------------------------------------------------------------}
+
+instance (Ord k, Arbitrary k, Arbitrary v) => Arbitrary (Diff k v) where
+  arbitrary = MapDiff.fromList <$> arbitrary
+instance (Arbitrary v) => Arbitrary (DiffHistory v) where
+  arbitrary = oneof [
+      singletonInsert <$> arbitrary
+    , singletonDelete <$> arbitrary
+    ]
+
+{-------------------------------------------------------------------------------
+  DiffSeq
+-------------------------------------------------------------------------------}
+
+instance (RMFT.SuperMeasured vt vi a, Arbitrary a)
+      => Arbitrary (RMFT.StrictFingerTree vt vi a) where
+  arbitrary = RMFT.fromList <$> arbitrary
+
+instance (Ord k, Arbitrary k, Arbitrary v)
+      => Arbitrary (RootMeasure k v) where
+  arbitrary = RootMeasure <$> arbitrary <*> arbitrary
+
+instance Arbitrary (InternalMeasure k v) where
+  arbitrary = InternalMeasure <$> arbitrary <*> arbitrary
+
+deriving newtype instance Arbitrary DS.Length
+deriving newtype instance Arbitrary DS.SlotNo
